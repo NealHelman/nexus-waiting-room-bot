@@ -1,0 +1,28 @@
+{  
+  "name": "nexus-waiting-room-bot",  
+  "version": "1.0.0",  
+  "private": true,  
+  "description": "Telegram-only approval bot for Nexus community access",  
+  "type": "module",  
+  "main": "dist/index.js",  
+  "scripts": {    
+    "dev": "tsx watch src/index.ts",    
+    "build": "tsc -p tsconfig.json",    
+    "start": "node dist/index.js",    
+    "typecheck": "tsc -p tsconfig.json --noEmit"  
+  },  
+  "engines": {    
+    "node": ">=20"  
+  },  
+  "dependencies": {    
+    "better-sqlite3": "^9.6.0",    
+    "dotenv": "^16.4.5",    
+    "telegraf": "^4.16.3",    
+    "winston": "^3.15.0"  
+  },  
+  "devDependencies": {    
+    "@types/node": "^22.7.4",    
+    "tsx": "^4.19.2",    
+    "typescript": "^5.6.3"  
+  }
+}
