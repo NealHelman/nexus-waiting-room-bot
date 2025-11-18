@@ -1,0 +1,197 @@
+// Heuristic spam scoring for candidate answers.
+// Produces a 0..1 score, reasons, and severity. Config-driven keyword lists and thresholds.
+
+import {
+  SPAM_KEYWORDS,
+  HAM_HINTS,
+  SPAM_NOTIFY_THRESHOLD,
+  SPAM_AUTODENY_THRESHOLD
+} from '../config/config.js';
+
+export type SpamSeverity = 'low' | 'medium' | 'high';
+
+export interface SpamSignals {
+  urls: number;
+  phones: number;
+  mentions: number;
+  emojis: number;
+  length: number;
+  wordCount: number;
+  uppercaseRatio: number;
+  nonLetterRatio: number;
+  uniqueCharRatio: number;
+  longestRepeatRatio: number;
+  suspiciousKeywords: string[];
+  hamHintsMatched: string[];
+}
+
+export interface SpamResult {
+  score: number; // 0..1
+  severity: SpamSeverity;
+  reasons: string[];
+  signals: SpamSignals;
+}
+
+const urlRegex = /\b(?:https?:\/\/|t\.me\/|wa\.me\/|telegram\.me\/|bit\.ly\/|tinyurl\.com\/|t\.co\/)[^\s]+/gi;
+const mentionRegex = /(^|[\s.,!?])@[a-zA-Z0-9_]{4,}(?=$|[\s.,!?])/g;
+const phoneRegex = /(?:\+?\d[\s-]?){7,15}/g;
+// Emoji detection: Extended Pictographic
+const emojiRegex = /\p{Extended_Pictographic}/gu;
+const letterRegex = /\p{L}/gu;
+
+// Default weights; bounded so total <= 1 after normalization/clamping
+const WEIGHTS = {
+  urls: 0.25,
+  phones: 0.15,
+  mentions: 0.1,
+  emojis: 0.1,
+  shortText: 0.25,
+  uppercase: 0.08,
+  repetition: 0.1,
+  lowUnique: 0.1,
+  nonLetter: 0.1,
+  keywords: 0.35,
+  hamBonus: -0.25 // reduces score if genuine hints found
+};
+
+// Normalize to 0..1 and clamp helper
+const clamp01 = (n: number) => Math.max(0, Math.min(1, n));
+
+function ratio(numerator: number, denominator: number): number {
+  if (denominator <= 0) return 0;
+  return numerator / denominator;
+}
+
+function getUppercaseRatio(text: string): number {
+  const onlyLetters = (text.match(letterRegex) || []).join('');
+  if (!onlyLetters) return 0;
+  const ups = onlyLetters.split('').filter((c) => c === c.toUpperCase()).length;
+  return ratio(ups, onlyLetters.length);
+}
+
+function getNonLetterRatio(text: string): number {
+  const total = text.length || 1;
+  const letters = (text.match(letterRegex) || []).length;
+  return clamp01(1 - ratio(letters, total));
+}
+
+function getUniqueCharRatio(text: string): number {
+  if (!text) return 0;
+  const set = new Set(text.split(''));
+  return ratio(set.size, text.length);
+}
+
+function getLongestRepeatRatio(text: string): number {
+  if (!text) return 0;
+  let maxRun = 1;
+  let curRun = 1;
+  for (let i = 1; i < text.length; i++) {
+    if (text[i] === text[i - 1]) {
+      curRun++;
+      if (curRun > maxRun) maxRun = curRun;
+    } else {
+      curRun = 1;
+    }
+  }
+  return ratio(maxRun, Math.max(1, text.length));
+}
+
+function findAll(re: RegExp, text: string): number {
+  const matches = text.match(re);
+  return matches ? matches.length : 0;
+}
+
+function findKeywords(text: string, list: string[]): string[] {
+  const lower = text.toLowerCase();
+  const found: string[] = [];
+  for (const kw of list) {
+    if (!kw) continue;
+    const needle = kw.toLowerCase();
+    if (lower.includes(needle)) found.push(kw);
+  }
+  return found;
+}
+
+function severityFromScore(score: number): SpamSeverity {
+  if (score >= SPAM_AUTODENY_THRESHOLD) return 'high';
+  if (score >= SPAM_NOTIFY_THRESHOLD) return 'medium';
+  return 'low';
+}
+
+export function evaluateAnswer(text: string): SpamResult {
+  const t = text || '';
+  const urls = findAll(urlRegex, t);
+  const phones = findAll(phoneRegex, t);
+  const mentions = findAll(mentionRegex, t);
+  const emojis = findAll(emojiRegex, t);
+  const length = t.length;
+  const wordCount = t.trim().split(/\s+/).filter(Boolean).length;
+
+  const uppercaseRatio = getUppercaseRatio(t);
+  const nonLetterRatio = getNonLetterRatio(t);
+  const uniqueCharRatio = getUniqueCharRatio(t);
+  const longestRepeatRatio = getLongestRepeatRatio(t);
+
+  const suspiciousKeywords = findKeywords(t, SPAM_KEYWORDS);
+  const hamHintsMatched = findKeywords(t, HAM_HINTS);
+
+  // Score components
+  let score = 0;
+
+  if (urls > 0) score += WEIGHTS.urls * clamp01(urls / 2);
+  if (phones > 0) score += WEIGHTS.phones * clamp01(phones / 2);
+  if (mentions > 0) score += WEIGHTS.mentions * clamp01(mentions / 3);
+  if (emojis > 3) score += WEIGHTS.emojis * clamp01((emojis - 3) / 5);
+
+  if (length < 40 || wordCount < 8) score += WEIGHTS.shortText;
+  if (uppercaseRatio > 0.5) score += WEIGHTS.uppercase * clamp01((uppercaseRatio - 0.5) / 0.5);
+  if (longestRepeatRatio > 0.1) score += WEIGHTS.repetition * clamp01((longestRepeatRatio - 0.1) / 0.4);
+  if (uniqueCharRatio < 0.25) score += WEIGHTS.lowUnique * clamp01((0.25 - uniqueCharRatio) / 0.25);
+  if (nonLetterRatio > 0.5) score += WEIGHTS.nonLetter * clamp01((nonLetterRatio - 0.5) / 0.5);
+
+  if (suspiciousKeywords.length > 0) {
+    // Scale keyword contribution up to the keywords weight
+    const kwFactor = clamp01(suspiciousKeywords.length / 4);
+    score += WEIGHTS.keywords * kwFactor;
+  }
+
+  if (hamHintsMatched.length > 0) {
+    const hamFactor = clamp01(hamHintsMatched.length / 3);
+    score += WEIGHTS.hamBonus * hamFactor;
+  }
+
+  score = clamp01(score);
+
+  const reasons: string[] = [];
+  if (urls) reasons.push(`contains ${urls} url(s)`);
+  if (phones) reasons.push(`contains ${phones} phone number(s)`);
+  if (mentions) reasons.push(`contains ${mentions} mention(s)`);
+  if (emojis > 3) reasons.push(`many emojis (${emojis})`);
+  if (length < 40 || wordCount < 8) reasons.push('very short / low content');
+  if (uppercaseRatio > 0.5) reasons.push('excessive uppercase');
+  if (longestRepeatRatio > 0.2) reasons.push('character repetition');
+  if (uniqueCharRatio < 0.25) reasons.push('low character diversity');
+  if (nonLetterRatio > 0.6) reasons.push('heavy symbols / non-letters');
+  if (suspiciousKeywords.length) reasons.push(`suspicious keywords: ${suspiciousKeywords.join(', ')}`);
+  if (hamHintsMatched.length) reasons.push(`genuine hints: ${hamHintsMatched.join(', ')}`);
+
+  return {
+    score,
+    severity: severityFromScore(score),
+    reasons,
+    signals: {
+      urls,
+      phones,
+      mentions,
+      emojis,
+      length,
+      wordCount,
+      uppercaseRatio,
+      nonLetterRatio,
+      uniqueCharRatio,
+      longestRepeatRatio,
+      suspiciousKeywords,
+      hamHintsMatched
+    }
+  };
+}
