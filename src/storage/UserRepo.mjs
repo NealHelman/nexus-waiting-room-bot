@@ -49,3 +49,13 @@ export function decide(id, decision, adminId, inviteLink = null) {
 export function getUser(id) {
   return db.prepare(`SELECT * FROM users WHERE id=@id`).get({ id });
 }
+
+export function listPending(limit = 50) {
+  return db.prepare(`
+    SELECT id, username, first_name, answer_text, answered_at
+    FROM users
+    WHERE state='PENDING_REVIEW'
+    ORDER BY answered_at ASC
+    LIMIT @limit
+  `).all({ limit });
+}
