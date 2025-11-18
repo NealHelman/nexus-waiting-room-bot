@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
+import { logSystem } from '../logger/logger.mjs';
 
 const db = new Database('nexus_waiting_room.sqlite');
-
 db.pragma('journal_mode = WAL');
 
 export function migrate() {
@@ -29,6 +29,7 @@ export function migrate() {
       at INTEGER
     );
   `);
+  logSystem('db_migrated');
 }
 
 export default db;
